@@ -6,5 +6,28 @@
 void matmul_simd(const float* A, const float* B, float* C,
                  int M, int N, int K, int lda, int ldb, int ldc) {
     // TODO(student): replace this placeholder with your register-tiled AVX2 implementation.
-    matmul_naive(A, B, C, M, N, K, lda, ldb, ldc);
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            __m256 acc = _mm256_setzero_ps();
+            const float* a = A + static_cast<long>(i) * lda;
+            const float* b = B + static_cast<long>(j) * ldb;
+            float sum = 0.0f;
+            int p=0;
+            for (; p+7 < K; p+=8) {
+                __m256 va = _mm256_loadu_ps(a + p);
+                __m256 vb = _mm256_loadu_ps(b + p);
+                acc = _mm256_fmadd_ps(va,vb,acc);
+            }
+            float temp[8];
+            _mm256_storeu_ps(temp,acc);
+            for(int k=0;k<8;k++){
+                sum += temp[i];
+            }
+            for(;p < K; p++){
+                sum += a[p] * b[p];
+            }
+            C[static_cast<long>(i) * ldc + j] = sum;
+        }
+    }
+    // matmul_naive(A, B, C, M, N, K, lda, ldb, ldc);
 }
