@@ -21,7 +21,7 @@ void matmul_simd(const float* A, const float* B, float* C,
             float temp[8];
             _mm256_storeu_ps(temp,acc);
             for(int k=0;k<8;k++){
-                sum += temp[i];
+                sum += temp[k];
             }
             for(;p < K; p++){
                 sum += a[p] * b[p];
