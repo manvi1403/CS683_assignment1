@@ -12,11 +12,12 @@
 #include "matmul.h"
 #include <vector>
 #include <cstdlib>
+#include <cstddef>
 
 const int MC = 128;
 const int NC = 256;
 const int KC = 256;
-const int MR = 4;
+const int MR = 8;
 const int NR = 8;
 const int PREFETCH_DISTANCE = 32;
 struct Buffer{
@@ -30,7 +31,7 @@ struct Buffer{
     Buffer(const Buffer&) = delete;
     Buffer& operator=(const Buffer&) = delete;
 };
-inline void pack_A(const float* A, float* A_pack, int mc, int kc, int lda){
+inline void pack_A(const float* __restrict A, float* __restrict A_pack, int mc, int kc, int lda){
     for(int i=0;i<mc;i++){
         const float*src = A + static_cast<long>(i) * lda;
         float* dst = A_pack + static_cast<long>(i) * kc;
@@ -46,125 +47,126 @@ inline void pack_A(const float* A, float* A_pack, int mc, int kc, int lda){
         }
     }
 }
-inline void pack_B(const float* B, float* B_pack, int nc, int kc, int ldb){
+inline void pack_B(const float* __restrict B, float* __restrict B_pack, int nc, int kc, int ldb){
     for(int i=0;i<nc;i++){
-        const float*src = B + static_cast<long>(i) * ldb;
-        float* dst = B_pack + static_cast<long>(i) * kc;
-        if(i+1<nc){
-            _mm_prefetch(reinterpret_cast<const char*>(src + ldb), _MM_HINT_T0);
-        }
-        int p = 0;
-        for(;p+7<kc;p+=8){
-            _mm256_storeu_ps(dst + p, _mm256_loadu_ps(src + p));
-        }
-        for(;p<kc;p++){
-            dst[p] = src[p];
-        }
-    }
-}
-template <int ROWS,int COLS>
-inline void micro_kernel_fix(const float* A,const float* B,float* C,int kc,int lda,int ldb,int ldc,bool f){
-    static_assert(ROWS > 0 && COLS > 0,"ROWS/COLS must be positive");
-
-    __m256 acc[ROWS][COLS];
-    #pragma GCC unroll 16
-    for(int i=0;i<ROWS;i++)
-        #pragma GCC unroll 16
-        for(int j=0;j<COLS;j++)
-            acc[i][j] = _mm256_setzero_ps();
-
-    #pragma GCC unroll 16
-    for(int i=0;i<ROWS;i++){
-        _mm_prefetch(reinterpret_cast<const char*>(C + static_cast<long>(i)*ldc),_MM_HINT_T0);
-    }
-
-    int p = 0;
-    for(;p+7<kc;p+=8){
-        if(p + PREFETCH_DISTANCE < kc){
-            #pragma GCC unroll 16
-            for(int i=0;i<ROWS;i++){
-                _mm_prefetch(reinterpret_cast<const char*>(A + static_cast<long>(i) * lda + p + PREFETCH_DISTANCE),_MM_HINT_T0);
-            }
-
-            #pragma GCC unroll 16
-            for(int j=0;j<COLS;j++){
-                _mm_prefetch(reinterpret_cast<const char*>(B + static_cast<long>(j) * ldb + p + PREFETCH_DISTANCE),_MM_HINT_T0);
-            }
-        }
-        __m256 va[ROWS];
-        __m256 vb[COLS];
-
-        #pragma GCC unroll 16
-        for(int i=0;i<ROWS;i++){
-            va[i] = _mm256_loadu_ps(A  + static_cast<long>(i)*lda + p);
-        }
-        #pragma GCC unroll 16
-        for(int i=0;i<COLS;i++){
-            vb[i] = _mm256_loadu_ps(B  + static_cast<long>(i)*ldb + p);
-        }
-
-        #pragma GCC unroll 16
-        for(int i=0;i<ROWS;i++)
-            #pragma GCC unroll 16;
-            for(int j=0;j<COLS;j++)
-                acc[i][j]= _mm256_fmadd_ps(va[i],vb[j],acc[i][j]);
-    }
-    #pragma GCC unroll 16
-    for(int i=0;i<ROWS;i++){
-        #pragma GCC unroll 16
-        for(int j=0;j<COLS;j++){
-            __m128 low = _mm256_castps256_ps128(acc[i][j]);
-            __m128 high = _mm256_extractf128_ps(acc[i][j],1);
-            __m128 sum4 = _mm_add_ps(low,high);
-            __m128 shuffle = _mm_movehdup_ps(sum4);
-            __m128 sums = _mm_add_ps(sum4 , shuffle);
-            shuffle = _mm_movehl_ps(shuffle,sums);
-            sums = _mm_add_ss(sums,shuffle);
-            float sum = _mm_cvtss_f32(sums);
-
-            for(int k=p;k<kc;k++){
-                sum+= A[static_cast<long>(i) *lda + k] * B[static_cast<long>(j)*ldb + k];
-            }
-            float* c = C + static_cast<long>(i) * ldc + j;
-            *c = f ? (*c + sum):sum;
+        const float*src = B + i;
+        float* dst = B_pack + static_cast<long>(i) * nc;
+        for(int j=0; j< nc;j++){
+            dst[j] = src[static_cast<long>(j) * ldb];
         }
     }
 }
 
-inline void micro_kernel_scalar(const float* A, const float* B, float * C, int rows, int cols, int kc, int lda, int ldb, int ldc, bool f){
-    #pragma GCC unroll 16
-    for(int i=0;i<rows;i++){
-        #pragma GCC unroll 16
-        for(int j=0;j<cols;j++){
-            float sum = 0.0f;
-            for(int k = 0;k<kc;k++){
-                sum+=A[static_cast<long>(i)*lda + k]*B[static_cast<long>(j)*ldb+k];
-            }
-            float* c = C + static_cast<long>(i)*ldc + j;
-            *c = f ? (*c + sum) : sum;
-        }
-    }
-}
-inline void run_tile(const float* A, const float* B, float* C, int rows, int cols, int kc, int lda, int ldb, int ldc, bool f){
-    if(rows == MR && cols == NR){
-        micro_kernel_fix<MR,NR>(A,B,C,kc,lda,ldb,ldc,f);
-    }
-    else if(rows == MR){
-        #pragma GCC unroll 16
-        for(int j=0;j<cols;j++){
-            micro_kernel_fix<MR,1>(A,B+static_cast<long>(j)*ldb,C + static_cast<long>(j), kc,lda,ldb,ldc,f);
-        }
-    }
-    else if(cols == NR){
-        #pragma GCC unroll 16
-        for(int i=0;i<rows;i++){
-            micro_kernel_fix<1,NR>(A + static_cast<long>(i)*lda, B, C + static_cast<long>(i)*ldc, kc, lda,ldb,ldc,f);
-        }
+
+inline void kernel(const float* __restrict A,const float* __restrict B,float* __restrict C,int kc,int ldb,int ldc,bool f){
+    __m256 c0,c1,c2,c3,c4,c5,c6,c7;
+    if(f){
+        c0 = _mm256_loadu_ps(C + 0*ldc);
+        c1 = _mm256_loadu_ps(C + 1*ldc);
+        c2 = _mm256_loadu_ps(C + 2*ldc);
+        c3 = _mm256_loadu_ps(C + 3*ldc);
+        c4 = _mm256_loadu_ps(C + 4*ldc);
+        c5 = _mm256_loadu_ps(C + 5*ldc);
+        c6 = _mm256_loadu_ps(C + 6*ldc);
+        c7 = _mm256_loadu_ps(C + 7*ldc);
     }
     else{
-        micro_kernel_scalar(A,B,C,rows,cols,kc,lda,ldb,ldc,f);
+        c0 = _mm256_setzero_ps();
+        c1 = _mm256_setzero_ps();
+        c2 = _mm256_setzero_ps();
+        c3 = _mm256_setzero_ps();
+        c4 = _mm256_setzero_ps();
+        c5 = _mm256_setzero_ps();
+        c6 = _mm256_setzero_ps();
+        c7 = _mm256_setzero_ps();
+    }
+    int k =0;
+    for(;k + 3 < kc;k+=4){
+        if(k + PREFETCH_DISTANCE < kc){
+            _mm_prefetch(reinterpret_cast<const char*>(A + k + PREFETCH_DISTANCE),_MM_HINT_T0);
+            _mm_prefetch(reinterpret_cast<const char*>(B + static_cast<long>(k + PREFETCH_DISTANCE) * ldb),_MM_HINT_T0);
+        }
+        __m256 b = _mm256_loadu_ps(B + static_cast<long>(k)*ldb);
+        c0 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k),b,c0);
+        c1 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + kc),b,c1);
+        c2 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 2*kc),b,c2);
+        c3 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 3*kc),b,c3);
+        c4 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 4*kc),b,c4);
+        c5 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 5*kc),b,c5);
+        c6 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 6*kc),b,c6);
+        c7 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 7*kc),b,c7);
+
+
+        b = _mm256_loadu_ps(B + static_cast<long>(k + 1)*ldb);
+        c0 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 1),b,c0);
+        c1 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + kc + 1),b,c1);
+        c2 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 2*kc + 1),b,c2);
+        c3 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 3*kc + 1),b,c3);
+        c4 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 4*kc+ 1),b,c4);
+        c5 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 5*kc+ 1),b,c5);
+        c6 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 6*kc + 1),b,c6);
+        c7 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 7*kc+1),b,c7);
+
+        b = _mm256_loadu_ps(B + static_cast<long>(k + 2)*ldb);
+        c0 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 2),b,c0);
+        c1 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + kc+2),b,c1);
+        c2 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 2*kc+2),b,c2);
+        c3 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 3*kc + 2),b,c3);
+        c4 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 4*kc + 2),b,c4);
+        c5 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 5*kc + 2),b,c5);
+        c6 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 6*kc + 2),b,c6);
+        c7 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 7*kc + 2),b,c7);
+
+
+        b = _mm256_loadu_ps(B + static_cast<long>(k + 3)*ldb);
+        c0 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 3),b,c0);
+        c1 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + kc + 3),b,c1);
+        c2 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 2*kc + 3),b,c2);
+        c3 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 3*kc + 3),b,c3);
+        c4 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 4*kc + 3),b,c4);
+        c5 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 5*kc  +3),b,c5);
+        c6 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 6*kc + 3),b,c6);
+        c7 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 7*kc + 3),b,c7);
+
+    }
+    for(;k < kc;k++){
+        const __m256 b = _mm256_loadu_ps(B + static_cast<long>(k) * ldb);
+        c0 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k),b,c0);
+        c1 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + kc),b,c1);
+        c2 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 2*kc),b,c2);
+        c3 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 3*kc),b,c3);
+        c4 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 4*kc),b,c4);
+        c5 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 5*kc),b,c5);
+        c6 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 6*kc),b,c6);
+        c7 = _mm256_fmadd_ps(_mm256_broadcast_ss(A + k + 7*kc),b,c7);
+    }
+
+    _mm256_storeu_ps(C + 0*ldc,c0);
+    _mm256_storeu_ps(C + 1*ldc,c1);
+    _mm256_storeu_ps(C + 2*ldc,c2);
+    _mm256_storeu_ps(C + 3*ldc,c3);
+    _mm256_storeu_ps(C + 4*ldc,c4);
+    _mm256_storeu_ps(C + 5*ldc,c5);
+    _mm256_storeu_ps(C + 6*ldc,c6);
+    _mm256_storeu_ps(C + 7*ldc,c7);
+
+}
+
+
+inline void edge_kernel(const float* __restrict A, const float* __restrict B, float* __restrict C, int rows, int cols, int kc, int ldb, int ldc, bool f){
+    for(int i=0;i<rows;i++){
+        for(int j=0;j<cols;j++){
+            float sum = f ? C[static_cast<long>(i)*ldc + j] : 0.0f;
+            const float* Arow = A + static_cast<long>(i)*kc;
+            for(int k=0;k<kc;k++){
+                sum += Arow[k] + B[static_cast<long>(k)* ldb + j];
+            }
+            C[static_cast<long>(i)*ldc + j] = sum;
+        }
     }
 }
+
+
 void matmul_optimized(const float* A, const float* B, float* C,
                       int M, int N, int K, int lda, int ldb, int ldc) {
     // TODO(student): replace this placeholder with your best combined implementation.
@@ -186,13 +188,18 @@ void matmul_optimized(const float* A, const float* B, float* C,
                     for(int l = 0; l < MC; l += MR){
                         int rows = std::min(MR, mc - l);
                         const float* Ablk = Apack + static_cast<long>(l) * kc;
-                        const float* Bblk = Bpack + static_cast<long>(k) * kc;
+                        const float* Bblk = Bpack + static_cast<long>(k);
                         float* Cblk = C + static_cast<long>(j + l)*ldc + (i + k);
-                        int next = l + MR;
+                        int next = l + 16;
                         if(next < mc){
                             _mm_prefetch(reinterpret_cast<const char*>(Apack + static_cast<long>(next)*kc), _MM_HINT_T0);
                         } 
-                        run_tile(Ablk, Bblk, Cblk, rows, cols, kc, kc, kc, ldc, f);
+                        if(rows == 8 && cols == 8){
+                            kernel(Ablk, Bblk, Cblk, kc, nc, ldc, f);
+                        }
+                        else{
+                            edge_kernel(Ablk, Bblk, Cblk, rows,cols, kc,nc,ldc,f);
+                        }
                     }
                 }
             }
