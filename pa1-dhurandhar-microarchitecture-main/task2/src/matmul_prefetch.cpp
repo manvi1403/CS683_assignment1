@@ -24,13 +24,22 @@ void matmul_prefetch(const float* A, const float* B, float* C,
                     float acc = 0.0f;
                     const float* b = B + static_cast<long>(jj) * ldb;
             // _mm_prefetch(reinterpret_cast<const char*>(B + static_cast<long>(j+8)*ldb),_MM_HINT_T0);
-                    for(int p =0;p <K;p++){
+                    __m256 vacc = _mm256_setzero_ps();
+                    int p=0;
+                    for(;p+8 <=K;p+=8){
                         if((p%16 == 0) && p+ Prefetch_Distance < K){
                             _mm_prefetch(reinterpret_cast<const char*>(a + p + Prefetch_Distance),_MM_HINT_T0);
                             _mm_prefetch(reinterpret_cast<const char*>(b + p + Prefetch_Distance),_MM_HINT_T0);
                         }
-                        acc += a[p]*b[p];
+                        // acc += a[p]*b[p];
+                        __m256 va = _mm256_loadu_ps(a + p); 
+                        __m256 vb = _mm256_loadu_ps(b + p);
+                        vacc = _mm256_fmadd_ps(va, vb, vacc);
                     }
+                    float tmp[8];
+                    _mm256_storeu_ps(tmp, vacc);
+                    for(int k=0;k<8;k++)acc+=tmp[k];
+                    for(;p<K;p++)acc+=a[p]*b[p];
                     C[static_cast<long>(ii)*ldc+jj] = acc;
                 }
             }

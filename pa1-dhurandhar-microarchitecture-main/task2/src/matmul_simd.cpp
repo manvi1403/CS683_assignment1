@@ -8,19 +8,19 @@ void matmul_simd(const float* A, const float* B, float* C,
     // TODO(student): replace this placeholder with your register-tiled AVX2 implementation.
     for (int i = 0; i < M; ++i) {
         for (int j = 0; j < N; ++j) {
-            __m128 acc = _mm_setzero_ps();
+            __m256 acc = _mm256_setzero_ps();
             const float* a = A + static_cast<long>(i) * lda;
             const float* b = B + static_cast<long>(j) * ldb;
             float sum = 0.0f;
             int p=0;
-            for (; p+3 < K; p+=4) {
-                __m128 va = _mm_loadu_ps(a + p);
-                __m128 vb = _mm_loadu_ps(b + p);
-                acc = _mm_fmadd_ps(va,vb,acc);
+            for (; p+7 < K; p+=8) {
+                __m256 va = _mm256_loadu_ps(a + p);
+                __m256 vb = _mm256_loadu_ps(b + p);
+                acc = _mm256_fmadd_ps(va,vb,acc);
             }
-            float temp[4];
-            _mm_storeu_ps(temp,acc);
-            for(int k=0;k<4;k++){
+            float temp[8];
+            _mm256_storeu_ps(temp,acc);
+            for(int k=0;k<8;k++){
                 sum += temp[k];
             }
             for(;p < K; p++){
