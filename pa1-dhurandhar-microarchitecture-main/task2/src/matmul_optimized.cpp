@@ -48,7 +48,7 @@ inline void pack_A(const float* __restrict A, float* __restrict A_pack, int mc, 
     }
 }
 inline void pack_B(const float* __restrict B, float* __restrict B_pack, int nc, int kc, int ldb){
-    for(int i=0;i<nc;i++){
+    for(int i=0;i<kc;i++){
         const float*src = B + i;
         float* dst = B_pack + static_cast<long>(i) * nc;
         for(int j=0; j< nc;j++){
@@ -159,7 +159,7 @@ inline void edge_kernel(const float* __restrict A, const float* __restrict B, fl
             float sum = f ? C[static_cast<long>(i)*ldc + j] : 0.0f;
             const float* Arow = A + static_cast<long>(i)*kc;
             for(int k=0;k<kc;k++){
-                sum += Arow[k] + B[static_cast<long>(k)* ldb + j];
+                sum += Arow[k] * B[static_cast<long>(k)* ldb + j];
             }
             C[static_cast<long>(i)*ldc + j] = sum;
         }
