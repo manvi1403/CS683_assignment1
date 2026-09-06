@@ -11,7 +11,7 @@ void matmul_prefetch(const float* A, const float* B, float* C,
     // matmul_naive(A, B, C, M, N, K, lda, ldb, ldc);
     int block_m = 32;
     int block_n = 32;
-    int Prefetch_Distance = 128;
+    int Prefetch_Distance = 64;
     for(int i=0;i<M;i+=block_m){
         // const float* a = A + static_cast<long>(i) * lda;
         // _mm_prefetch(reinterpret_cast<const char*>(A + static_cast<long>(i+8)*lda),_MM_HINT_T0);
