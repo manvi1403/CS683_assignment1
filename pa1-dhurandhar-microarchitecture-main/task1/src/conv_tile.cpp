@@ -7,7 +7,7 @@ void conv_tile(const float* in, float* out, const float* ker,
                 int p=K/2;
                 int in_stride=W+2*p;
     // TODO(student): replace this placeholder with your tiled/blocked implementation.
-    int tile_size=124;
+    int tile_size=32;
     for(int i=0;i<H;i+=tile_size){
         for(int j=0;j<W;j+=tile_size){
             int h=(i+tile_size < H)?i+tile_size :H;
